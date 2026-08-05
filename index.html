@@ -274,7 +274,9 @@ const state = {
   timeLeft: 300,
   paused: false,
   interval: null,
-  warned: false
+  warned: false,
+  phaseEnd: null,
+  pauseRemaining: null
 };
 
 // Αντιστοίχιση των MP3 αρχείων σου
@@ -345,8 +347,10 @@ function renderDots() {
   for (let i=1; i<=state.rounds; i++) {
     const d = document.createElement('div');
     d.className = 'round-dot';
-    if (i < state.currentRound) d.classList.add('done');
-    if (i === state.currentRound && state.phase !== 'idle') d.classList.add('current');
+    const finished = i < state.currentRound || (i === state.currentRound && (state.phase === 'rest' || state.phase === 'done'));
+    const active = i === state.currentRound && (state.phase === 'round' || state.phase === 'countdown');
+    if (finished) d.classList.add('done');
+    if (active) d.classList.add('current');
     row.appendChild(d);
   }
 }
@@ -402,7 +406,12 @@ function updateMainBtn() {
 }
 
 function adjust(key, delta) {
-  if (state.phase !== 'idle') return;
+  if (state.phase !== 'idle' && state.phase !== 'done') return;
+  if (state.phase === 'done') {
+    state.phase = 'idle';
+    state.currentRound = 1;
+    state.phaseEnd = null;
+  }
   if (key === 'rounds') state.rounds = Math.max(1, Math.min(20, state.rounds+delta));
   if (key === 'roundTime') state.roundTime = Math.max(30, Math.min(1800, state.roundTime+delta));
   if (key === 'restTime') state.restTime = Math.max(0, Math.min(300, state.restTime+delta));
@@ -410,75 +419,85 @@ function adjust(key, delta) {
   renderSettings();
   renderDots();
   renderTimer();
+  updateMainBtn();
 }
 
-function tick() {
-  if (state.paused) return;
+function startPhase(phase, seconds) {
+  state.phase = phase;
+  state.timeLeft = seconds;
+  state.phaseEnd = Date.now() + seconds * 1000;
+}
+
+function advancePhase() {
   if (state.phase === 'countdown') {
-    if (state.timeLeft > 0) {
-      soundCountdown(state.timeLeft);
-      state.timeLeft--;
+    startPhase('round', state.roundTime);
+    state.warned = false;
+    soundStart();
+  } else if (state.phase === 'round') {
+    soundEnd();
+    if (state.currentRound >= state.rounds) {
+      state.phase = 'done';
+      state.timeLeft = 0;
+      state.phaseEnd = null;
+      clearInterval(state.interval);
+      state.interval = null;
+    } else if (state.restTime > 0) {
+      startPhase('rest', state.restTime);
     } else {
-      state.phase = 'round';
-      state.timeLeft = state.roundTime;
+      state.currentRound++;
+      startPhase('round', state.roundTime);
       state.warned = false;
       soundStart();
     }
-  } else if (state.phase === 'round') {
-    if (state.timeLeft === 10 && !state.warned) {
+  } else if (state.phase === 'rest') {
+    state.currentRound++;
+    startPhase('round', state.roundTime);
+    state.warned = false;
+    soundStart();
+  }
+}
+
+// Χρησιμοποιεί πραγματικό χρόνο (Date.now) αντί για μέτρημα ticks,
+// ώστε το χρονόμετρο να μην καθυστερεί όταν ο browser tab είναι στο παρασκήνιο.
+function tick() {
+  if (state.paused || state.phaseEnd === null) return;
+
+  let remaining = Math.round((state.phaseEnd - Date.now()) / 1000);
+  while (remaining <= 0 && state.phaseEnd !== null) {
+    advancePhase();
+    remaining = state.phaseEnd !== null
+      ? Math.round((state.phaseEnd - Date.now()) / 1000)
+      : 0;
+  }
+
+  if (state.phaseEnd !== null) {
+    state.timeLeft = remaining;
+    if (state.phase === 'round' && state.timeLeft <= 10 && !state.warned) {
       state.warned = true;
       soundWarn();
     }
-    if (state.timeLeft > 0) {
-      state.timeLeft--;
-    } else {
-      soundEnd();
-      if (state.currentRound >= state.rounds) {
-        state.phase = 'done';
-        clearInterval(state.interval);
-        state.interval = null;
-      } else if (state.restTime > 0) {
-        state.phase = 'rest';
-        state.timeLeft = state.restTime;
-      } else {
-        state.currentRound++;
-        state.phase = 'round';
-        state.timeLeft = state.roundTime;
-        state.warned = false;
-        soundStart();
-      }
-    }
-  } else if (state.phase === 'rest') {
-    if (state.timeLeft > 0) {
-      state.timeLeft--;
-    } else {
-      state.currentRound++;
-      state.phase = 'round';
-      state.timeLeft = state.roundTime;
-      state.warned = false;
-      soundStart();
-    }
   }
+
   renderTimer();
   renderDots();
   updateMainBtn();
-
-  if (state.phase === 'done') {
-    renderTimer(); renderDots(); updateMainBtn();
-  }
 }
 
 function handleMain() {
   if (state.phase === 'idle' || state.phase === 'done') {
     state.currentRound = 1;
-    state.phase = 'countdown';
-    state.timeLeft = 3;
     state.warned = false;
     state.paused = false;
+    startPhase('countdown', 3);
+    soundCountdown(3);
     if (state.interval) clearInterval(state.interval);
     state.interval = setInterval(tick, 1000);
+  } else if (state.paused) {
+    state.paused = false;
+    startPhase(state.phase, state.pauseRemaining);
   } else {
-    state.paused = !state.paused;
+    state.paused = true;
+    state.pauseRemaining = Math.max(0, Math.round((state.phaseEnd - Date.now()) / 1000));
   }
   renderTimer(); renderDots(); updateMainBtn();
 }
@@ -491,6 +510,8 @@ function handleStop() {
   state.timeLeft = state.roundTime;
   state.paused = false;
   state.warned = false;
+  state.phaseEnd = null;
+  state.pauseRemaining = null;
   renderTimer(); renderDots(); updateMainBtn();
 }
 
